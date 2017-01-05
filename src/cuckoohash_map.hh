@@ -238,11 +238,11 @@ private:
         }
 
         template <typename K, typename... Args>
-        void setKV(size_t ind, partial_t p, K&& k, Args&&... args) {
+        void setKV(allocator_type& alloc,
+                   size_t ind, partial_t p, K&& k, Args&&... args) {
             partial(ind) = p;
-            static allocator_type pair_allocator;
             occupied_[ind] = true;
-            pair_allocator.construct(
+            alloc.construct(
                 &storage_kvpair(ind),
                 std::piecewise_construct,
                 std::forward_as_tuple(std::forward<K>(k)),
@@ -264,12 +264,13 @@ private:
 
         // Moves the item in b1[slot1] into b2[slot2] without copying
         static void move_to_bucket(
+            allocator_type& alloc,
             Bucket& b1, size_t slot1,
             Bucket& b2, size_t slot2) {
             assert(b1.occupied(slot1));
             assert(!b2.occupied(slot2));
             storage_value_type& tomove = b1.storage_kvpair(slot1);
-            b2.setKV(slot2, b1.partial(slot1),
+            b2.setKV(alloc, slot2, b1.partial(slot1),
                      std::move(tomove.first), std::move(tomove.second));
             b1.eraseKV(slot1);
         }
@@ -358,8 +359,9 @@ public:
                    double mlf = DEFAULT_MINIMUM_LOAD_FACTOR,
                    size_t mhp = NO_MAXIMUM_HASHPOWER,
                    const hasher& hf = hasher(),
-                   const key_equal eql = key_equal())
-        : hash_fn(hf), eq_fn(eql) {
+                   const key_equal& eql = key_equal(),
+                   const allocator_type& alloc = allocator_type())
+        : hash_fn(hf), eq_fn(eql), pair_allocator_(alloc) {
         minimum_load_factor(mlf);
         maximum_hashpower(mhp);
         const size_t hp = reserve_calc(n);
@@ -635,6 +637,11 @@ public:
     //! key_eq returns the equality predicate object used by the table.
     key_equal key_eq() const noexcept {
         return eq_fn;
+    }
+
+    //! get_allocator returns the allocator object used by the table.
+    allocator_type get_allocator() const noexcept {
+        return pair_allocator_;
     }
 
     //! Returns a \ref reference to the mapped value stored at the given key.
@@ -1199,7 +1206,7 @@ private:
                 return false;
             }
 
-            Bucket::move_to_bucket(fb, fs, tb, ts);
+            Bucket::move_to_bucket(pair_allocator_, fb, fs, tb, ts);
             if (depth == 1) {
                 // Hold onto the locks contained in twob
                 b = std::move(twob);
@@ -1318,7 +1325,8 @@ private:
     void add_to_bucket(const partial_t partial, Bucket& b,
                        const size_t slot, K&& key, Args&&... val) {
         assert(!b.occupied(slot));
-        b.setKV(slot, partial, std::forward<K>(key), std::forward<Args>(val)...);
+        b.setKV(pair_allocator_, slot, partial,
+                std::forward<K>(key), std::forward<Args>(val)...);
         num_inserts_[get_counterid()].num.fetch_add(
             1, std::memory_order_relaxed);
     }
@@ -1664,6 +1672,7 @@ private:
                         // We're moving the key from the old bucket to the new
                         // one
                         Bucket::move_to_bucket(
+                            pair_allocator_,
                             old_bucket, slot, new_bucket, new_bucket_slot++);
                     } else {
                         // Check that we don't want to move the new key
@@ -1767,7 +1776,12 @@ private:
         // Creates a new hash table with hashpower new_hp and adds all
         // the elements from the old buckets
         cuckoohash_map<Key, T, Hash, Pred, Alloc, slot_per_bucket> new_map(
-            hashsize(new_hp) * slot_per_bucket);
+            hashsize(new_hp) * slot_per_bucket,
+            0.0, /* minimum load factor */
+            NO_MAXIMUM_HASHPOWER,
+            hash_function(),
+            key_eq(),
+            get_allocator());
         parallel_exec(
             0, hashsize(hp), kNumCores(),
             [this, &new_map]
@@ -2153,6 +2167,9 @@ private:
 
     // The equality function
     key_equal eq_fn;
+
+    // The allocator
+    allocator_type pair_allocator_;
 };
 
 #endif // _CUCKOOHASH_MAP_HH
